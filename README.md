@@ -156,3 +156,664 @@ g++ -std=c++17 -O2 tralalelotralala.cpp -o sorting_benchmark
 📈 Сравнение алгоритмов	Автоматическое ранжирование и расчёт относительной производительности
 7. Лицензия
 Программа распространяется свободно для образовательных и исследовательских целей.
+## #include <iostream>
+#include <vector>
+#include <algorithm>
+#include <random>
+#include <chrono>
+#include <iomanip>
+#include <string>
+#include <limits>
+#include <thread>
+#include <map>
+#include <functional>
+#include <sstream>
+
+#ifdef _WIN32
+    #include <windows.h>
+    #include <psapi.h>
+#else
+    #include <sys/resource.h>
+    #include <unistd.h>
+#endif
+
+// Цвета для терминала
+namespace Color {
+    const std::string RESET   = "\033[0m";
+    const std::string RED     = "\033[31m";
+    const std::string GREEN   = "\033[32m";
+    const std::string YELLOW  = "\033[33m";
+    const std::string BLUE    = "\033[34m";
+    const std::string PURPLE  = "\033[35m";
+    const std::string CYAN    = "\033[36m";
+    const std::string BOLD    = "\033[1m";
+}
+
+// Класс для хранения результатов теста
+struct TestResult {
+    std::string algorithmName;
+    long long totalTimeMs;
+    long long totalTimeNs;
+    long long totalOperations;
+    double avgOpsPerMs;
+    size_t totalMemoryBytes;
+    size_t avgMemoryBytes;
+    
+    TestResult(std::string name, long long timeMs, long long timeNs, long long ops, 
+               size_t memBytes, int iterations)
+        : algorithmName(name), totalTimeMs(timeMs), totalTimeNs(timeNs), 
+          totalOperations(ops), totalMemoryBytes(memBytes), 
+          avgMemoryBytes(memBytes / iterations) {
+        avgOpsPerMs = timeMs > 0 ? static_cast<double>(ops) / timeMs : 0;
+    }
+};
+
+// Класс для хранения настроек массива
+struct ArrayConfig {
+    int size;
+    int minVal;
+    int maxVal;
+    int iterations;
+    std::vector<int> originalArray;
+    
+    ArrayConfig(int sz, int minV, int maxV, int iter, std::vector<int> arr)
+        : size(sz), minVal(minV), maxVal(maxV), iterations(iter), originalArray(arr) {}
+};
+
+// Глобальные переменные
+std::random_device rd;
+std::mt19937 gen(rd());
+
+// Форматирование размера памяти
+std::string formatMemory(size_t bytes) {
+    if (bytes < 1024) return std::to_string(bytes) + " B";
+    if (bytes < 1024 * 1024) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << (bytes / 1024.0) << " KB";
+        return oss.str();
+    }
+    if (bytes < 1024 * 1024 * 1024) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0)) << " MB";
+        return oss.str();
+    }
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << (bytes / (1024.0 * 1024.0 * 1024.0)) << " GB";
+    return oss.str();
+}
+
+// Получение текущего использования памяти
+size_t getCurrentMemoryUsage() {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS_EX pmc;
+    GetProcessMemoryInfo(GetCurrentProcess(), (PROCESS_MEMORY_COUNTERS*)&pmc, sizeof(pmc));
+    return pmc.WorkingSetSize;
+#else
+    struct rusage usage;
+    getrusage(RUSAGE_SELF, &usage);
+    return usage.ru_maxrss * 1024; // ru_maxrss в килобайтах на Linux
+#endif
+}
+
+// Безопасное чтение целого числа
+int readIntSafe(const std::string& prompt) {
+    while (true) {
+        std::cout << Color::CYAN << prompt << Color::RESET;
+        std::string input;
+        std::getline(std::cin, input);
+        
+        if (input.empty()) {
+            std::cout << Color::RED << "❌ Ошибка: введите число!" << Color::RESET << std::endl;
+            continue;
+        }
+        
+        try {
+            return std::stoi(input);
+        } catch (const std::exception&) {
+            std::cout << Color::RED << "❌ Ошибка: введите корректное целое число!" << Color::RESET << std::endl;
+        }
+    }
+}
+
+// Безопасное чтение с проверкой диапазона
+int readIntInRange(const std::string& prompt, int min, int max) {
+    while (true) {
+        int value = readIntSafe(prompt);
+        if (value >= min && value <= max) {
+            return value;
+        }
+        std::cout << Color::RED << "❌ Ошибка: число должно быть от " 
+                  << min << " до " << max << "!" << Color::RESET << std::endl;
+    }
+}
+
+// Генерация случайного массива
+std::vector<int> generateRandomArray(int size, int min, int max) {
+    std::vector<int> arr(size);
+    std::uniform_int_distribution<> dis(min, max);
+    for (int i = 0; i < size; i++) {
+        arr[i] = dis(gen);
+    }
+    return arr;
+}
+
+// ==================== ПУЗЫРЬКОВАЯ СОРТИРОВКА ====================
+long long bubbleSort(std::vector<int>& arr) {
+    long long operations = 0;
+    int n = arr.size();
+    for (int i = 0; i < n - 1; i++) {
+        for (int j = 0; j < n - i - 1; j++) {
+            operations++;
+            if (arr[j] > arr[j + 1]) {
+                std::swap(arr[j], arr[j + 1]);
+                operations++;
+            }
+        }
+    }
+    return operations;
+}
+
+// ==================== СОРТИРОВКА СЛИЯНИЕМ ====================
+void merge(std::vector<int>& arr, int left, int mid, int right, long long& ops) {
+    int n1 = mid - left + 1;
+    int n2 = right - mid;
+    
+    std::vector<int> L(n1), R(n2);
+    
+    for (int i = 0; i < n1; i++) {
+        L[i] = arr[left + i];
+        ops++;
+    }
+    for (int j = 0; j < n2; j++) {
+        R[j] = arr[mid + 1 + j];
+        ops++;
+    }
+    
+    int i = 0, j = 0, k = left;
+    while (i < n1 && j < n2) {
+        ops++;
+        if (L[i] <= R[j]) {
+            arr[k] = L[i];
+            i++;
+        } else {
+            arr[k] = R[j];
+            j++;
+        }
+        ops++;
+        k++;
+    }
+    
+    while (i < n1) {
+        arr[k] = L[i];
+        ops++;
+        i++;
+        k++;
+    }
+    
+    while (j < n2) {
+        arr[k] = R[j];
+        ops++;
+        j++;
+        k++;
+    }
+}
+
+void mergeSortRecursive(std::vector<int>& arr, int left, int right, long long& ops) {
+    if (left < right) {
+        int mid = left + (right - left) / 2;
+        mergeSortRecursive(arr, left, mid, ops);
+        mergeSortRecursive(arr, mid + 1, right, ops);
+        merge(arr, left, mid, right, ops);
+    }
+}
+
+long long mergeSort(std::vector<int>& arr) {
+    long long operations = 0;
+    mergeSortRecursive(arr, 0, arr.size() - 1, operations);
+    return operations;
+}
+
+// ==================== ПИРАМИДАЛЬНАЯ СОРТИРОВКА (HEAP SORT) ====================
+void heapify(std::vector<int>& arr, int n, int i, long long& ops) {
+    int largest = i;
+    int left = 2 * i + 1;
+    int right = 2 * i + 2;
+    
+    ops++;
+    if (left < n && arr[left] > arr[largest]) {
+        largest = left;
+    }
+    
+    ops++;
+    if (right < n && arr[right] > arr[largest]) {
+        largest = right;
+    }
+    
+    if (largest != i) {
+        std::swap(arr[i], arr[largest]);
+        ops += 3;
+        heapify(arr, n, largest, ops);
+    }
+}
+
+long long heapSort(std::vector<int>& arr) {
+    long long operations = 0;
+    int n = arr.size();
+    
+    for (int i = n / 2 - 1; i >= 0; i--) {
+        heapify(arr, n, i, operations);
+    }
+    
+    for (int i = n - 1; i > 0; i--) {
+        std::swap(arr[0], arr[i]);
+        operations++;
+        heapify(arr, i, 0, operations);
+    }
+    return operations;
+}
+
+// ==================== СОРТИРОВКА КУЧЕЙ (АЛЬТЕРНАТИВНАЯ) ====================
+void heapifyAlt(std::vector<int>& arr, int n, int i, long long& ops) {
+    int largest = i;
+    int l = 2 * i + 1;
+    int r = 2 * i + 2;
+    
+    if (l < n) {
+        ops++;
+        if (arr[l] > arr[largest]) {
+            largest = l;
+        }
+    }
+    
+    if (r < n) {
+        ops++;
+        if (arr[r] > arr[largest]) {
+            largest = r;
+        }
+    }
+    
+    if (largest != i) {
+        std::swap(arr[i], arr[largest]);
+        ops += 2;
+        heapifyAlt(arr, n, largest, ops);
+    }
+}
+
+long long heapSortAlt(std::vector<int>& arr) {
+    long long operations = 0;
+    int n = arr.size();
+    
+    for (int i = n / 2 - 1; i >= 0; i--) {
+        heapifyAlt(arr, n, i, operations);
+    }
+    
+    for (int i = n - 1; i >= 0; i--) {
+        std::swap(arr[0], arr[i]);
+        operations += 2;
+        heapifyAlt(arr, i, 0, operations);
+    }
+    return operations;
+}
+
+// ==================== ЗАМЕР ПРОИЗВОДИТЕЛЬНОСТИ ====================
+TestResult measurePerformance(const std::string& name, const std::vector<int>& data, 
+                              int iterations, 
+                              std::function<long long(std::vector<int>&)> sortFunc) {
+    std::cout << "\n" << Color::CYAN << "┌───────────────────────────────────────────────────────────────────────┐" << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "│" << Color::BOLD << " " << std::left << std::setw(40) << name << Color::RESET << Color::CYAN << "                    │" << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "├───────────────────────────────────────────────────────────────────────┤" << Color::RESET << std::endl;
+    
+    long long totalOps = 0;
+    size_t totalMemoryUsed = 0;
+    
+    // Прогрев
+    std::vector<int> warmupArr = data;
+    sortFunc(warmupArr);
+    
+    auto startTime = std::chrono::high_resolution_clock::now();
+    
+    for (int iter = 0; iter < iterations; iter++) {
+        std::vector<int> arrCopy = data;
+        
+        size_t memBefore = getCurrentMemoryUsage();
+        long long ops = sortFunc(arrCopy);
+        size_t memAfter = getCurrentMemoryUsage();
+        
+        long long memUsed = (memAfter > memBefore) ? (memAfter - memBefore) : 0;
+        totalMemoryUsed += memUsed;
+        totalOps += ops;
+        
+        // Прогресс
+        if (iterations > 1 && (iter + 1) % std::max(1, iterations / 10) == 0) {
+            std::cout << "\r" << Color::CYAN << "│ Прогресс: " << Color::RESET 
+                      << std::setw(3) << (iter + 1) << "/" << iterations << std::flush;
+        }
+    }
+    
+    if (iterations > 1) {
+        std::cout << "\r" << Color::CYAN << "│ Прогресс: " << Color::RESET 
+                  << std::setw(3) << iterations << "/" << iterations << " ✅" << std::endl;
+    }
+    
+    auto endTime = std::chrono::high_resolution_clock::now();
+    auto durationNs = std::chrono::duration_cast<std::chrono::nanoseconds>(endTime - startTime).count();
+    auto durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+    auto durationMicros = std::chrono::duration_cast<std::chrono::microseconds>(endTime - startTime).count();
+    
+    double avgOpsPerMs = (durationMs > 0) ? static_cast<double>(totalOps) / durationMs : totalOps;
+    double avgOpsPerSec = avgOpsPerMs * 1000;
+    
+    std::cout << Color::CYAN << "├───────────────────────────────────────────────────────────────────────┤" << Color::RESET << std::endl;
+    
+    // Время выполнения
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "Время (наносекунды):" 
+              << Color::YELLOW << std::right << std::setw(15) << durationNs << " ns" << Color::RESET 
+              << " (" << durationMicros << " μs)" << std::endl;
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "Время (миллисекунды):" 
+              << Color::YELLOW << std::right << std::setw(12) << durationMs << " ms" << Color::RESET 
+              << " (" << std::fixed << std::setprecision(3) << (durationMs / 1000.0) << " сек)" << std::endl;
+    
+    // Операции
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "Всего операций:" 
+              << Color::GREEN << std::right << std::setw(15) << totalOps << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "Производительность:" 
+              << Color::PURPLE << std::right << std::setw(15) << std::fixed << std::setprecision(2) << avgOpsPerMs << " оп/мс" << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "Производительность:" 
+              << Color::PURPLE << std::right << std::setw(15) << std::fixed << std::setprecision(2) << avgOpsPerSec << " оп/сек" << Color::RESET << std::endl;
+    
+    // Память
+    std::cout << Color::CYAN << "├───────────────────────────────────────────────────────────────────────┤" << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "Всего памяти:" 
+              << Color::BLUE << std::right << std::setw(15) << formatMemory(totalMemoryUsed) << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "В среднем за итерацию:" 
+              << Color::BLUE << std::right << std::setw(15) << formatMemory(totalMemoryUsed / iterations) << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "В байтах (всего):" 
+              << Color::BLUE << std::right << std::setw(15) << totalMemoryUsed << " байт" << Color::RESET << std::endl;
+    
+    // Эффективность по памяти
+    double memoryPerElement = static_cast<double>(totalMemoryUsed) / (data.size() * iterations);
+    std::cout << Color::CYAN << "│" << Color::RESET << " " << std::left << std::setw(25) << "Память на элемент:" 
+              << Color::BLUE << std::right << std::setw(15) << std::fixed << std::setprecision(2) << memoryPerElement << " байт/элемент" << Color::RESET << std::endl;
+    
+    std::cout << Color::CYAN << "└───────────────────────────────────────────────────────────────────────┘" << Color::RESET << std::endl;
+    
+    return TestResult(name, durationMs, durationNs, totalOps, totalMemoryUsed, iterations);
+}
+
+// ==================== СРАВНЕНИЕ АЛГОРИТМОВ ====================
+void compareAlgorithms(std::vector<TestResult>& results) {
+    std::cout << "\n" << Color::BOLD << Color::PURPLE << std::endl;
+    std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║                          📊 СРАВНЕНИЕ АЛГОРИТМОВ 📊                           ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════════════════════╝" << Color::RESET << std::endl;
+    
+    if (results.empty()) return;
+    
+    // Сортировка результатов по времени выполнения
+    std::sort(results.begin(), results.end(), 
+              [](const TestResult& a, const TestResult& b) { return a.totalTimeMs < b.totalTimeMs; });
+    
+    std::cout << "\n" << Color::YELLOW << "┌─────┬────────────────────────┬────────────┬──────────────┬──────────────────┬────────────────┐" << Color::RESET << std::endl;
+    std::cout << Color::YELLOW << "│ #   │ Алгоритм               │ Время (ms) │ Время (μs)   │ Операций         │ Память         │" << Color::RESET << std::endl;
+    std::cout << Color::YELLOW << "├─────┼────────────────────────┼────────────┼──────────────┼──────────────────┼────────────────┤" << Color::RESET << std::endl;
+    
+    for (size_t i = 0; i < results.size(); i++) {
+        const auto& r = results[i];
+        std::string medal = (i == 0) ? "🥇" : (i == 1) ? "🥈" : (i == 2) ? "🥉" : "  ";
+        
+        std::string timeColor = (i == 0) ? Color::GREEN : (i == 1) ? Color::YELLOW : Color::RESET;
+        std::string nameColor = (i == 0) ? Color::BOLD + Color::GREEN : Color::RESET;
+        
+        long long timeMicros = r.totalTimeNs / 1000;
+        
+        std::cout << medal << " " << std::setw(3) << std::left << (i + 1) << " │ "
+                  << nameColor << std::setw(24) << std::left << r.algorithmName << Color::RESET << "│ "
+                  << timeColor << std::setw(10) << std::right << r.totalTimeMs << Color::RESET << " │ "
+                  << std::setw(12) << timeMicros << " │ "
+                  << std::setw(16) << r.totalOperations << " │ "
+                  << std::setw(14) << formatMemory(r.avgMemoryBytes) << " │" << std::endl;
+    }
+    
+    std::cout << Color::YELLOW << "└─────┴────────────────────────┴────────────┴──────────────┴──────────────────┴────────────────┘" << Color::RESET << std::endl;
+    
+    const TestResult& best = results[0];
+    auto mostMemoryEfficient = std::min_element(results.begin(), results.end(),
+        [](const TestResult& a, const TestResult& b) { return a.avgMemoryBytes < b.avgMemoryBytes; });
+    
+    std::cout << "\n" << Color::GREEN << Color::BOLD << "╔══════════════════════════════════════════════════════════════════════════════╗" << Color::RESET << std::endl;
+    std::cout << Color::GREEN << Color::BOLD << "║                              🏆 ЛУЧШИЙ АЛГОРИТМ 🏆                            ║" << Color::RESET << std::endl;
+    std::cout << Color::GREEN << Color::BOLD << "╚══════════════════════════════════════════════════════════════════════════════╝" << Color::RESET << std::endl;
+    
+    std::cout << "\n" << Color::GREEN << "🏆 Самый быстрый: " << best.algorithmName << Color::RESET << std::endl;
+    std::cout << "   • Время: " << Color::YELLOW << best.totalTimeMs << " ms (" << (best.totalTimeNs / 1000) << " μs)" << Color::RESET << std::endl;
+    std::cout << "   • Память: " << Color::BLUE << formatMemory(best.avgMemoryBytes) << " за итерацию" << Color::RESET << std::endl;
+    
+    if (mostMemoryEfficient->algorithmName != best.algorithmName) {
+        std::cout << "\n" << Color::CYAN << "💾 Самый экономный по памяти: " << mostMemoryEfficient->algorithmName << Color::RESET << std::endl;
+        std::cout << "   • Память: " << Color::BLUE << formatMemory(mostMemoryEfficient->avgMemoryBytes) << " за итерацию" << Color::RESET << std::endl;
+    }
+    
+    std::cout << "\n" << Color::CYAN << "📈 Относительное сравнение (по времени):" << Color::RESET << std::endl;
+    for (size_t i = 1; i < results.size(); i++) {
+        const auto& r = results[i];
+        double speedup = static_cast<double>(r.totalTimeMs) / best.totalTimeMs;
+        std::cout << "   • " << r.algorithmName << " " << Color::RED << "⬇" << Color::RESET 
+                  << " медленнее в " << std::fixed << std::setprecision(2) << speedup << " раз" << std::endl;
+    }
+    
+    std::cout << "\n" << Color::CYAN << "📊 Относительное сравнение (по памяти):" << Color::RESET << std::endl;
+    for (const auto& r : results) {
+        if (r.algorithmName != mostMemoryEfficient->algorithmName) {
+            double memoryRatio = static_cast<double>(r.avgMemoryBytes) / mostMemoryEfficient->avgMemoryBytes;
+            std::cout << "   • " << r.algorithmName << " использует в " 
+                      << std::fixed << std::setprecision(2) << memoryRatio << " раз больше памяти" << std::endl;
+        }
+    }
+}
+
+// ==================== МЕНЮ ВЫБОРА АЛГОРИТМОВ ====================
+void runAlgorithmMenu(ArrayConfig& config) {
+    std::vector<TestResult> results;
+    
+    std::cout << Color::YELLOW << "\n┌─────────────── ВЫБОР АЛГОРИТМОВ ───────────────┐" << Color::RESET << std::endl;
+    std::cout << "│ 1 — Пузырьковая сортировка                      │" << std::endl;
+    std::cout << "│ 2 — Сортировка слиянием                         │" << std::endl;
+    std::cout << "│ 3 — Пирамидальная сортировка (Heap)             │" << std::endl;
+    std::cout << "│ 4 — Сортировка кучей                            │" << std::endl;
+    std::cout << "│ 5 — ВСЕ алгоритмы и сравнение                   │" << std::endl;
+    std::cout << "│ 0 — Вернуться в главное меню                    │" << std::endl;
+    std::cout << Color::YELLOW << "└─────────────────────────────────────────────────┘" << Color::RESET << std::endl;
+    
+    int choice = readIntInRange("👉 Ваш выбор: ", 0, 5);
+    
+    if (choice == 0) return;
+    
+    std::cout << Color::BLUE << "\n🚀 Запуск бенчмарка...\n" << Color::RESET << std::endl;
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    
+    switch (choice) {
+        case 1:
+            results.push_back(measurePerformance("Пузырьковая сортировка", config.originalArray, 
+                                                 config.iterations, bubbleSort));
+            break;
+        case 2:
+            results.push_back(measurePerformance("Сортировка слиянием", config.originalArray, 
+                                                 config.iterations, mergeSort));
+            break;
+        case 3:
+            results.push_back(measurePerformance("Пирамидальная сортировка (Heap)", config.originalArray, 
+                                                 config.iterations, heapSort));
+            break;
+        case 4:
+            results.push_back(measurePerformance("Сортировка кучей", config.originalArray, 
+                                                 config.iterations, heapSortAlt));
+            break;
+        case 5:
+            results.push_back(measurePerformance("Пузырьковая сортировка", config.originalArray, 
+                                                 config.iterations, bubbleSort));
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            results.push_back(measurePerformance("Сортировка слиянием", config.originalArray, 
+                                                 config.iterations, mergeSort));
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            results.push_back(measurePerformance("Пирамидальная сортировка (Heap)", config.originalArray, 
+                                                 config.iterations, heapSort));
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            results.push_back(measurePerformance("Сортировка кучей", config.originalArray, 
+                                                 config.iterations, heapSortAlt));
+            break;
+    }
+    
+    if (choice == 5) {
+        compareAlgorithms(results);
+    }
+    
+    std::cout << "\n" << Color::GREEN << "✅ Тест завершен!" << Color::RESET << std::endl;
+    std::cout << Color::CYAN << "Нажмите Enter для продолжения..." << Color::RESET;
+    std::cin.get();
+}
+
+// ==================== НАСТРОЙКА МАССИВА ====================
+ArrayConfig setupArray() {
+    std::cout << Color::YELLOW << "\n┌─────────────── НАСТРОЙКА МАССИВА ───────────────┐" << Color::RESET << std::endl;
+    
+    int size = readIntInRange("│ Размер массива (от 10 до 100000): ", 10, 100000);
+    
+    std::cout << Color::CYAN << "│ Минимальное значение: " << Color::RESET;
+    int minVal = readIntSafe("");
+    
+    std::cout << Color::CYAN << "│ Максимальное значение: " << Color::RESET;
+    int maxVal = readIntSafe("");
+    
+    while (maxVal <= minVal) {
+        std::cout << Color::RED << "❌ Ошибка: максимальное значение должно быть больше минимального!" << Color::RESET << std::endl;
+        std::cout << Color::CYAN << "│ Максимальное значение: " << Color::RESET;
+        maxVal = readIntSafe("");
+    }
+    
+    int iterations = readIntInRange("│ Количество итераций теста (1-100): ", 1, 100);
+    
+    std::cout << Color::YELLOW << "└─────────────────────────────────────────────────┘" << Color::RESET << std::endl;
+    
+    std::cout << Color::GREEN << "\n🎲 Генерация случайного массива..." << Color::RESET << std::endl;
+    std::vector<int> arr = generateRandomArray(size, minVal, maxVal);
+    
+    std::cout << Color::GREEN << "\n✅ Массив создан! Размер: " << size << " элементов" << Color::RESET << std::endl;
+    std::cout << Color::BLUE << "   Диапазон: [" << minVal << ", " << maxVal << "]" << Color::RESET << std::endl;
+    std::cout << Color::BLUE << "   Итераций: " << iterations << Color::RESET << std::endl;
+    
+    long long arrayMemory = static_cast<long long>(size) * sizeof(int);
+    std::cout << Color::BLUE << "   Память массива: ~" << formatMemory(arrayMemory) << Color::RESET << std::endl;
+    
+    return ArrayConfig(size, minVal, maxVal, iterations, arr);
+}
+
+// ==================== ПОКАЗ ТЕКУЩИХ НАСТРОЕК ====================
+void showCurrentConfig(const ArrayConfig* config) {
+    if (config == nullptr) {
+        std::cout << Color::YELLOW << "\n⚠ Массив еще не настроен!" << Color::RESET << std::endl;
+        return;
+    }
+    
+    std::cout << Color::BLUE << "\n📊 Текущие настройки:" << Color::RESET << std::endl;
+    std::cout << "   • Размер массива: " << Color::GREEN << config->size << Color::RESET << " элементов" << std::endl;
+    std::cout << "   • Диапазон значений: " << Color::GREEN << "[" << config->minVal << ", " << config->maxVal << "]" << Color::RESET << std::endl;
+    std::cout << "   • Количество итераций: " << Color::GREEN << config->iterations << Color::RESET << std::endl;
+    std::cout << "   • Память массива: " << Color::BLUE << "~" << formatMemory(config->size * sizeof(int)) << Color::RESET << std::endl;
+}
+
+// ==================== ИНФОРМАЦИЯ О СИСТЕМЕ ====================
+void showSystemInfo() {
+    std::cout << Color::CYAN << "\n💻 Информация о системе:" << Color::RESET << std::endl;
+    std::cout << "   • Доступно процессоров: " << std::thread::hardware_concurrency() << std::endl;
+    std::cout << "   • Используется памяти: " << formatMemory(getCurrentMemoryUsage()) << std::endl;
+}
+
+// ==================== ГЛАВНОЕ МЕНЮ ====================
+int main() {
+    // Настройка локали для корректного отображения Unicode
+    #ifdef _WIN32
+    SetConsoleOutputCP(CP_UTF8);
+    #endif
+    
+    ArrayConfig* config = nullptr;
+    
+    std::cout << Color::BOLD << "\n" << Color::PURPLE;
+    std::cout << "╔══════════════════════════════════════════════════════════════════╗" << std::endl;
+    std::cout << "║                    ⚡ SORTING BENCHMARK ⚡                       ║" << std::endl;
+    std::cout << "║       Измерение производительности и использования памяти        ║" << std::endl;
+    std::cout << "╚══════════════════════════════════════════════════════════════════╝" << Color::RESET << std::endl;
+    
+    std::cout << Color::BLUE << "\n📊 Доступные алгоритмы:" << Color::RESET << std::endl;
+    std::cout << "   • Пузырьковая сортировка (Bubble Sort) - O(n²)" << std::endl;
+    std::cout << "   • Сортировка слиянием (Merge Sort) - O(n log n)" << std::endl;
+    std::cout << "   • Пирамидальная сортировка (Heap Sort) - O(n log n)" << std::endl;
+    std::cout << "   • Сортировка кучей (альтернативная) - O(n log n)\n" << std::endl;
+    
+    while (true) {
+        std::cout << "\n" << Color::PURPLE << Color::BOLD << "═══════════════════ ГЛАВНОЕ МЕНЮ ═══════════════════" << Color::RESET << std::endl;
+        std::cout << Color::YELLOW << "┌─────────────────────────────────────────────────┐" << Color::RESET << std::endl;
+        std::cout << "│ 1 — Настроить массив                            │" << std::endl;
+        std::cout << "│ 2 — Показать текущие настройки                  │" << std::endl;
+        std::cout << "│ 3 — Запустить тестирование алгоритмов           │" << std::endl;
+        std::cout << "│ 4 — Сгенерировать новый массив                  │" << std::endl;
+        std::cout << "│ 5 — Информация о системе                        │" << std::endl;
+        std::cout << "│ 0 — Выход                                       │" << std::endl;
+        std::cout << Color::YELLOW << "└─────────────────────────────────────────────────┘" << Color::RESET << std::endl;
+        
+        int mainChoice = readIntInRange("👉 Ваш выбор: ", 0, 5);
+        
+        switch (mainChoice) {
+            case 0:
+                std::cout << "\n" << Color::GREEN << "👋 До свидания! Спасибо за использование программы!" << Color::RESET << std::endl;
+                delete config;
+                return 0;
+                
+            case 1:
+                delete config;
+                config = new ArrayConfig(setupArray());
+                std::cout << "\n" << Color::GREEN << "✅ Настройка завершена!" << Color::RESET << std::endl;
+                std::cout << Color::CYAN << "Нажмите Enter для продолжения..." << Color::RESET;
+                std::cin.get();
+                break;
+                
+            case 2:
+                showCurrentConfig(config);
+                std::cout << "\n" << Color::CYAN << "Нажмите Enter для продолжения..." << Color::RESET;
+                std::cin.get();
+                break;
+                
+            case 3:
+                if (config == nullptr) {
+                    std::cout << Color::RED << "\n❌ Ошибка: сначала настройте массив!" << Color::RESET << std::endl;
+                    std::cout << Color::CYAN << "Нажмите Enter для продолжения..." << Color::RESET;
+                    std::cin.get();
+                    break;
+                }
+                runAlgorithmMenu(*config);
+                break;
+                
+            case 4:
+                if (config == nullptr) {
+                    std::cout << Color::RED << "\n❌ Ошибка: сначала настройте массив!" << Color::RESET << std::endl;
+                    std::cout << Color::CYAN << "Нажмите Enter для продолжения..." << Color::RESET;
+                    std::cin.get();
+                    break;
+                }
+                std::cout << Color::GREEN << "\n🎲 Генерация нового случайного массива..." << Color::RESET << std::endl;
+                config->originalArray = generateRandomArray(config->size, config->minVal, config->maxVal);
+                std::cout << Color::GREEN << "✅ Новый массив создан!" << Color::RESET << std::endl;
+                std::cout << Color::CYAN << "Нажмите Enter для продолжения..." << Color::RESET;
+                std::cin.get();
+                break;
+                
+            case 5:
+                showSystemInfo();
+                std::cout << "\n" << Color::CYAN << "Нажмите Enter для продолжения..." << Color::RESET;
+                std::cin.get();
+                break;
+        }
+    }
+    
+    delete config;
+    return 0;
+}
